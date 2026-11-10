@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Encuesta sobre la huelga general</title>
+<style>
+  :root { --ink:#1f2937; --muted:#6b7280; --line:#d1d5db; --accent:#1d4ed8; --bg:#f9fafb; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+         color:var(--ink); background:var(--bg); line-height:1.5; }
+  main { max-width: 640px; margin: 0 auto; padding: 20px 16px 48px; }
+  h1 { font-size: 1.4rem; margin: 0 0 12px; }
+  h2 { font-size: 1.05rem; margin: 24px 0 8px; }
+  p { margin: 0 0 12px; }
+  .muted { color: var(--muted); font-size: .9rem; }
+  .bar { height: 6px; background: #e5e7eb; border-radius: 3px; margin-bottom: 20px; overflow: hidden; }
+  .bar > div { height: 100%; background: var(--accent); transition: width .3s; }
+  .group { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
+  .group.col { flex-direction: column; }
+  .opt { flex: 1 1 auto; min-width: 48px; padding: 12px 14px; font-size: 1rem; background: #fff;
+         border: 2px solid var(--line); border-radius: 10px; cursor: pointer; color: var(--ink);
+         text-align: left; }
+  .opt.sel { border-color: var(--accent); background: #eff6ff; font-weight: 600; }
+  .group.scale .opt { flex: 0 0 calc(25% - 6px); text-align: center; }
+  .group.scale .opt.wide { flex: 1 1 100%; }
+  input[type=number] { width: 140px; padding: 12px; font-size: 1.1rem; border: 2px solid var(--line);
+                       border-radius: 10px; }
+  .primary { width: 100%; padding: 14px; font-size: 1.05rem; font-weight: 600; color: #fff;
+             background: var(--accent); border: 0; border-radius: 10px; cursor: pointer; margin-top: 16px; }
+  .primary:disabled { background: #9ca3af; cursor: not-allowed; }
+  .info { background: #fff; border: 1px solid var(--line); border-radius: 10px; padding: 14px 16px; margin: 12px 0; }
+  .tiempo { background: #eef2ff; border-left: 5px solid var(--accent); border-radius: 6px;
+            padding: 12px 14px; margin: 12px 0; }
+  .tiempo b { display: block; margin-bottom: 4px; }
+  .note { background: #fef3c7; border: 1px solid #fcd34d; padding: 10px; border-radius: 8px;
+          font-size: .85rem; margin-top: 16px; }
+  pre { white-space: pre-wrap; word-break: break-all; font-size: .72rem; background:#fff;
+        border:1px solid var(--line); padding:8px; border-radius:8px; }
+</style>
+</head>
+<body>
+<main id="app"></main>
+
+<script>
+/* ============ CONFIGURACIÓN ============ */
+const CONFIG = {
+  // URL de la aplicación web de Google Apps Script (termina en /exec).
+  // Si se deja vacío, la página funciona en modo prueba y no guarda nada.
+  endpoint: "https://script.google.com/macros/s/AKfycbyXATepNwnN5miAamX5GQTOZjVQo0xJO3fWGYYcfJen8iHehhUDI989umXxF0uHAxRj/exec",
+  // Segundos que debe esperar la persona antes de poder pasar de la pantalla informativa.
+  minSegundosInfo: 6,
+  // Texto opcional de contacto que aparece en la pantalla final (por ejemplo un correo).
+  contacto: "smsoler@clio.uc3m.es"
+};
+
+// Previsión meteorológica que se muestra SOLO al grupo de tratamiento.
+// Compruebe la previsión en AccuWeather justo antes de lanzar la encuesta y actualice el valor.
+const FORECAST = {
+  fuente: "AccuWeather",
+  prob: 99            // porcentaje de probabilidad de precipitación para el miércoles
+};
+
+/* ============ UTILIDADES ============ */
+function randInt(n) {
+  if (window.crypto && crypto.getRandomValues) {
+    const buf = new Uint32Array(1);
+    const limit = Math.floor(4294967296 / n) * n;
+    do { crypto.getRandomValues(buf); } while (buf[0] >= limit);
+    return buf[0] % n;
+  }
+  return Math.floor(Math.random() * n);
+}
+function uid() {
+  if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+  return "r" + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+}
+
+const params = new URLSearchParams(location.search);
+const state = {
+  id: uid(),
+  src: params.get("src") || "",
+  startedAt: Date.now(),
+  treat: null,
+  data: {},          // todas las variables que se guardan
+  demoLog: []
+};
+
+const app = document.getElementById("app");
+function clear() { app.innerHTML = ""; window.scrollTo(0, 0); }
+function node(html) {
+  const t = document.createElement("template");
+  t.innerHTML = html.trim();
+  return t.content.firstChild;
+}
+function progress(frac) {
+  return node('<div class="bar"><div style="width:' + Math.round(frac * 100) + '%"></div></div>');
+}
+function group(options, onSelect, cls) {
+  const wrap = document.createElement("div");
+  wrap.className = "group " + (cls || "");
+  options.forEach(o => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "opt" + (o.wide ? " wide" : "");
+    b.textContent = o.label;
+    b.addEventListener("click", () => {
+      Array.from(wrap.children).forEach(c => c.classList.remove("sel"));
+      b.classList.add("sel");
+      onSelect(o.value);
+    });
+    wrap.appendChild(b);
+  });
+  return wrap;
+}
+function scale11() {
+  const s = [];
+  for (let i = 0; i <= 10; i++) s.push({ label: String(i), value: i });
+  return s;
+}
+
+/* ============ ENVÍO DE DATOS ============ */
+function pendingList() {
+  try { return JSON.parse(localStorage.getItem("pending_rows_huelga") || "[]"); } catch (e) { return []; }
+}
+function savePending(list) {
+  try { localStorage.setItem("pending_rows_huelga", JSON.stringify(list)); } catch (e) {}
+}
+function post(row) {
+  return fetch(CONFIG.endpoint, {
+    method: "POST", mode: "no-cors",
+    headers: { "Content-Type": "text/plain;charset=utf-8" },
+    body: JSON.stringify(row), keepalive: true
+  });
+}
+function sendStage(etapa) {
+  const row = Object.assign({
+    respondent_id: state.id,
+    etapa: etapa,
+    timestamp: new Date().toISOString(),
+    fuente: state.src,
+    segundos_total: Math.round((Date.now() - state.startedAt) / 1000)
+  }, state.data);
+  if (!CONFIG.endpoint) { state.demoLog.push(row); console.log("MODO PRUEBA", row); return; }
+  const queue = pendingList();
+  queue.push(row);
+  savePending(queue);
+  flush();
+}
+async function flush() {
+  let queue = pendingList();
+  while (queue.length) {
+    try { await post(queue[0]); } catch (e) { return; }
+    queue = pendingList();
+    queue.shift();
+    savePending(queue);
+  }
+}
+window.addEventListener("online", () => { if (CONFIG.endpoint) flush(); });
+
+/* ============ PANTALLAS ============ */
+function showIntro() {
+  clear();
+  app.appendChild(progress(0));
+  app.appendChild(node(
+    '<div><h1>Bienvenido/a y gracias por participar</h1>' +
+    '<p>Esta encuesta forma parte de una investigación académica sobre opinión pública. ' +
+    'Responder lleva unos 3 minutos y no hay respuestas correctas ni incorrectas.</p>' +
+    '<p>La participación es voluntaria y anónima. No se recogen nombres, correos ni direcciones IP. ' +
+    'Los datos se usarán solo con fines de investigación y se presentarán de forma agregada. ' +
+    'Puede abandonar en cualquier momento cerrando esta página.</p>' +
+    '<p>Al pulsar el botón confirma que tiene 18 años o más y que acepta participar ' +
+    'voluntariamente.</p></div>'));
+  const btn = node('<button class="primary" type="button">Acepto y quiero continuar</button>');
+  btn.addEventListener("click", showCovariates);
+  app.appendChild(btn);
+  if (!CONFIG.endpoint) {
+    app.appendChild(node('<div class="note">Modo prueba. No hay servidor configurado, así que las ' +
+      'respuestas no se guardan.</div>'));
+  }
+}
+
+function showCovariates() {
+  clear();
+  app.appendChild(progress(0.1));
+  app.appendChild(node("<h1>Primero, algunos datos generales</h1>"));
+  const d = state.data;
+
+  app.appendChild(node("<h2>¿Reside actualmente en la Comunidad de Madrid?</h2>"));
+  app.appendChild(group([
+    { label: "Sí", value: "Si" }, { label: "No", value: "No" }
+  ], v => { d.reside_madrid = v; check(); }));
+
+  app.appendChild(node("<h2>¿Cuántos años tiene?</h2>"));
+  const age = node('<input type="number" inputmode="numeric" min="18" max="99" placeholder="Edad">');
+  app.appendChild(age);
+
+  app.appendChild(node("<h2>¿Con qué género se identifica?</h2>"));
+  app.appendChild(group([
+    { label: "Hombre", value: "Hombre" }, { label: "Mujer", value: "Mujer" },
+    { label: "No binario u otra identidad", value: "No binario u otra" },
+    { label: "Prefiero no decirlo", value: "NS/NC" }
+  ], v => { d.genero = v; check(); }, "col"));
+
+  app.appendChild(node("<h2>¿Cuál es su situación laboral actual?</h2>"));
+  app.appendChild(group([
+    { label: "Trabajo por cuenta ajena", value: "Cuenta ajena" },
+    { label: "Trabajo por cuenta propia", value: "Cuenta propia" },
+    { label: "Estudio", value: "Estudia" },
+    { label: "Desempleado/a", value: "Desempleado" },
+    { label: "Jubilado/a o pensionista", value: "Jubilado" },
+    { label: "Otra situación", value: "Otra" }
+  ], v => { d.situacion_laboral = v; check(); }, "col"));
+
+  app.appendChild(node("<h2>¿Ha participado alguna vez en una huelga o en una manifestación?</h2>"));
+  app.appendChild(group([
+    { label: "Sí, en una huelga", value: "Huelga" },
+    { label: "Sí, en una manifestación", value: "Manifestacion" },
+    { label: "Sí, en ambas", value: "Ambas" },
+    { label: "No, nunca", value: "Nunca" }
+  ], v => { d.participacion_previa = v; check(); }, "col"));
+
+  app.appendChild(node(
+    "<h2>Ideología</h2><p>En política se habla de «izquierda» y «derecha». En una escala de 0 a 10, " +
+    "donde 0 es la extrema izquierda y 10 es la extrema derecha, ¿dónde se situaría usted?</p>"));
+  const ideo = scale11().map(o => ({ label: o.label, value: String(o.value) }));
+  ideo.push({ label: "Prefiero no contestar", value: "NS/NC", wide: true });
+  app.appendChild(group(ideo, v => { d.ideologia = v; check(); }, "scale"));
+  app.appendChild(node('<p class="muted">0 = extrema izquierda &nbsp;·&nbsp; 10 = extrema derecha</p>'));
+
+  const next = node('<button class="primary" type="button" disabled>Continuar</button>');
+  app.appendChild(next);
+
+  function check() {
+    const a = parseInt(age.value, 10);
+    d.edad = a;
+    next.disabled = !(d.reside_madrid && a >= 18 && a <= 99 && d.genero &&
+                      d.situacion_laboral && d.participacion_previa && d.ideologia);
+  }
+  age.addEventListener("input", check);
+
+  next.addEventListener("click", () => {
+    if (d.reside_madrid !== "Si") {
+      d.elegible = 0;
+      sendStage("excluido");
+      showExcluded();
+      return;
+    }
+    d.elegible = 1;
+    // Asignación aleatoria 50/50 al tratamiento (previsión de lluvia) o control
+    state.treat = randInt(2);
+    d.tratamiento = state.treat;
+    d.prob_lluvia_mostrada = state.treat === 1 ? FORECAST.prob : "";
+    sendStage("asignacion");
+    showInfo();
+  });
+}
+
+function showExcluded() {
+  clear();
+  app.appendChild(progress(1));
+  app.appendChild(node("<div><h1>Muchas gracias</h1>" +
+    "<p>Esta encuesta está dirigida a personas que residen en la Comunidad de Madrid, " +
+    "así que no necesitamos más respuestas suyas. Agradecemos mucho su interés.</p></div>"));
+  showDemoDump();
+}
+
+function showInfo() {
+  clear();
+  app.appendChild(progress(0.35));
+  app.appendChild(node("<h1>Información de actualidad</h1>"));
+  app.appendChild(node('<p class="muted">Lea con atención el texto siguiente. Después le haremos algunas preguntas.</p>'));
+  app.appendChild(node(
+    '<div class="info"><p>El <b>miércoles 11 de noviembre</b> está convocada una <b>huelga general de 24 horas</b> ' +
+    'en toda España. La convocan los sindicatos CCOO y UGT junto con otras organizaciones sindicales y sociales, ' +
+    'bajo el lema «Salarios, vivienda y precios». Está previsto que haya manifestaciones en distintas ciudades.</p></div>'));
+
+  if (state.treat === 1) {
+    app.appendChild(node(
+      '<div class="tiempo"><b>Previsión del tiempo</b>' +
+      'Según la previsión de ' + FORECAST.fuente + ', el miércoles 11 de noviembre se espera lluvia en la ' +
+      'Comunidad de Madrid, con una probabilidad de precipitación del ' + FORECAST.prob + '%.</div>'));
+  }
+
+  const t0 = Date.now();
+  const btn = node('<button class="primary" type="button" disabled>Continuar</button>');
+  app.appendChild(btn);
+  let left = CONFIG.minSegundosInfo;
+  function tick() {
+    if (left > 0) { btn.textContent = "Continuar (espere " + left + " s)"; left--; setTimeout(tick, 1000); }
+    else { btn.textContent = "Continuar"; btn.disabled = false; }
+  }
+  tick();
+  btn.addEventListener("click", () => {
+    state.data.segundos_info = Math.round((Date.now() - t0) / 1000);
+    showOutcomes();
+  });
+}
+
+function showOutcomes() {
+  clear();
+  app.appendChild(progress(0.6));
+  app.appendChild(node("<h1>Sus intenciones</h1>"));
+  const d = state.data;
+
+  app.appendChild(node(
+    "<h2>¿Con qué probabilidad apoyará usted la huelga general del miércoles 11 de noviembre, " +
+    "ya sea secundándola o apoyándola de otra forma?</h2>" +
+    "<p class='muted'>0 = nada probable, 10 = completamente probable</p>"));
+  app.appendChild(group(scale11(), v => { d.apoyo_huelga = v; check(); }, "scale"));
+
+  app.appendChild(node(
+    "<h2>¿Con qué probabilidad acudirá usted a alguna de las manifestaciones convocadas ese día?</h2>" +
+    "<p class='muted'>0 = nada probable, 10 = completamente probable</p>"));
+  app.appendChild(group(scale11(), v => { d.asistencia_manifestacion = v; check(); }, "scale"));
+
+  const next = node('<button class="primary" type="button" disabled>Continuar</button>');
+  app.appendChild(next);
+  function check() {
+    next.disabled = !(d.apoyo_huelga !== undefined && d.asistencia_manifestacion !== undefined);
+  }
+  next.addEventListener("click", showCheck);
+}
+
+function showCheck() {
+  clear();
+  app.appendChild(progress(0.85));
+  app.appendChild(node("<h1>Una última pregunta</h1>"));
+  app.appendChild(node("<h2>En el texto que leyó antes, ¿se mencionaba la previsión del tiempo para el miércoles?</h2>"));
+  app.appendChild(group([
+    { label: "Sí, se esperaba lluvia", value: "Lluvia" },
+    { label: "Sí, se esperaba buen tiempo", value: "Buen tiempo" },
+    { label: "No se mencionaba el tiempo", value: "No mencionado" },
+    { label: "No lo recuerdo", value: "No recuerda" }
+  ], v => { state.data.chequeo_manipulacion = v; next.disabled = false; }, "col"));
+  const next = node('<button class="primary" type="button" disabled>Enviar y terminar</button>');
+  app.appendChild(next);
+  next.addEventListener("click", () => {
+    sendStage("final");
+    showEnd();
+  });
+}
+
+function showEnd() {
+  clear();
+  app.appendChild(progress(1));
+  app.appendChild(node(
+    "<div><h1>Muchas gracias</h1>" +
+    "<p>Sus respuestas se han registrado. Para que lo sepa, este estudio analiza si la información sobre el " +
+    "tiempo previsto influye en la intención de apoyar una huelga y de acudir a manifestaciones. " +
+    "A la mitad de las personas participantes, elegidas al azar, se les mostró la previsión meteorológica " +
+    "y a la otra mitad no. La información sobre la huelga era idéntica para todas.</p>" +
+    "<p>Sus respuestas son anónimas y se analizarán solo de forma agregada. Ya puede cerrar esta página.</p>" +
+    (CONFIG.contacto ? "<p class='muted'>Contacto " + CONFIG.contacto + "</p>" : "") + "</div>"));
+  showDemoDump();
+}
+
+function showDemoDump() {
+  if (CONFIG.endpoint) return;
+  app.appendChild(node('<div class="note">Modo prueba. Estas son las filas que se habrían guardado.</div>'));
+  const pre = document.createElement("pre");
+  pre.textContent = JSON.stringify(state.demoLog, null, 1);
+  app.appendChild(pre);
+}
+
+/* ============ INICIO ============ */
+if (CONFIG.endpoint) flush();
+showIntro();
+</script>
+</body>
+</html>
